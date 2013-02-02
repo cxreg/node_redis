@@ -530,6 +530,29 @@ function try_callback(callback, reply) {
     }
 }
 
+// exceptions thrown by event handlers will be caught by the try block
+// in on_data and emitted as 'error' events.  this escapes domain handling
+// so emit errors to the active domain if there is one
+function try_emit(obj, event, args) {
+    try {
+        var emit_args = [event];
+
+        var l = arguments.length;
+        for (var i = 2; i < l; i++)
+            emit_args.push(arguments[i]);
+
+        obj.emit.apply(obj, emit_args);
+    } catch (err) {
+        if (process.domain) {
+            process.domain.emit('error', err);
+            process.domain.exit();
+        }
+        else {
+            obj.emit('error', err);
+        }
+    }
+}
+
 // hgetall converts its replies to an Object.  If the reply is empty, null is returned.
 function reply_to_object(reply) {
     var obj = {}, j, jl, key, val;
@@ -601,9 +624,9 @@ RedisClient.prototype.return_reply = function (reply) {
             type = reply[0].toString();
 
             if (type === "message") {
-                this.emit("message", reply[1].toString(), reply[2]); // channel, message
+                try_emit(this, "message", reply[1].toString(), reply[2]); // channel, message
             } else if (type === "pmessage") {
-                this.emit("pmessage", reply[1].toString(), reply[2].toString(), reply[3]); // pattern, channel, message
+                try_emit(this, "pmessage", reply[1].toString(), reply[2].toString(), reply[3]); // pattern, channel, message
             } else if (type === "subscribe" || type === "unsubscribe" || type === "psubscribe" || type === "punsubscribe") {
                 if (reply[2] === 0) {
                     this.pub_sub_mode = false;
@@ -618,7 +641,7 @@ RedisClient.prototype.return_reply = function (reply) {
                 if (command_obj && typeof command_obj.callback === "function") {
                     try_callback(command_obj.callback, reply[1].toString());
                 }
-                this.emit(type, reply[1].toString(), reply[2]); // channel, count
+                try_emit(this, type, reply[1].toString(), reply[2]); // channel, count
             } else {
                 throw new Error("subscriptions are active but got unknown reply type " + type);
             }
