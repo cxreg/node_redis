@@ -514,14 +514,43 @@ RedisClient.prototype.return_error = function (err) {
 };
 
 // if a callback throws an exception, re-throw it on a new stack so the parser can keep going.
+// if a domain is active, emit the error on the domain, which will serve the same function.
 // put this try/catch in its own function because V8 doesn't optimize this well yet.
 function try_callback(callback, reply) {
     try {
         callback(null, reply);
     } catch (err) {
-        process.nextTick(function () {
-            throw err;
-        });
+        if (process.domain) {
+            process.domain.emit('error', err);
+            process.domain.exit();
+        } else {
+            process.nextTick(function () {
+                throw err;
+            });
+        }
+    }
+}
+
+// exceptions thrown by event handlers will be caught by the try block
+// in on_data and emitted as 'error' events.  this escapes domain handling
+// so emit errors to the active domain if there is one
+function try_emit(obj, event, args) {
+    try {
+        var emit_args = [event];
+
+        var l = arguments.length;
+        for (var i = 2; i < l; i++)
+            emit_args.push(arguments[i]);
+
+        obj.emit.apply(obj, emit_args);
+    } catch (err) {
+        if (process.domain) {
+            process.domain.emit('error', err);
+            process.domain.exit();
+        }
+        else {
+            obj.emit('error', err);
+        }
     }
 }
 
@@ -606,9 +635,9 @@ RedisClient.prototype.return_reply = function (reply) {
             type = reply[0].toString();
 
             if (type === "message") {
-                this.emit("message", reply[1].toString(), reply[2]); // channel, message
+                try_emit(this, "message", reply[1].toString(), reply[2]); // channel, message
             } else if (type === "pmessage") {
-                this.emit("pmessage", reply[1].toString(), reply[2].toString(), reply[3]); // pattern, channel, message
+                try_emit(this, "pmessage", reply[1].toString(), reply[2].toString(), reply[3]); // pattern, channel, message
             } else if (type === "subscribe" || type === "unsubscribe" || type === "psubscribe" || type === "punsubscribe") {
                 if (reply[2] === 0) {
                     this.pub_sub_mode = false;
@@ -623,7 +652,7 @@ RedisClient.prototype.return_reply = function (reply) {
                 if (command_obj && typeof command_obj.callback === "function") {
                     try_callback(command_obj.callback, reply[1].toString());
                 }
-                this.emit(type, reply[1].toString(), reply[2]); // channel, count
+                try_emit(this, type, reply[1].toString(), reply[2]); // channel, count
             } else {
                 throw new Error("subscriptions are active but got unknown reply type " + type);
             }
@@ -685,6 +714,8 @@ RedisClient.prototype.send_command = function (command, args, callback) {
     } else {
         throw new Error("send_command: second argument must be an array");
     }
+
+    if (callback && process.domain) callback = process.domain.bind(callback);
 
     // if the last argument is an array and command is sadd, expand it out:
     //     client.sadd(arg1, [arg2, arg3, arg4], cb);
